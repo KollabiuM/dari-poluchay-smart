@@ -1,45 +1,150 @@
 """
-Обработчики команд для досок.
-/boards, /join, /board, кнопки действий.
+Обработчики для досок.
+Просмотр, вход, детали, генерация картинки.
 """
 import logging
-from typing import Optional
+from typing import Optional, Dict, List
 
 from aiogram import Router, F
+from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import AsyncSessionLocal
 from services.table_service import TableService, JoinResult
 from services.user_service import UserService
-from models.table import LEVELS, TableStatus
-from keyboards.board_keyboards import (
-    get_levels_kb,
-    get_board_detail_kb,
-    get_boards_list_kb,
-    get_confirm_join_kb,
-)
-from texts.board_messages import (
-    get_boards_list_message,
-    get_board_detail_message,
-    get_join_success_message,
-    get_join_error_message,
-    get_no_boards_message,
-    get_levels_message,
-)
-from utils.send_message_utils import alert
+from services.board_image_service import get_board_image_service
+from models.table import LEVELS, Table, TableStatus
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 router = Router(name="boards")
 logger = logging.getLogger(__name__)
 
 
 # ===========================================
+# КЛАВИАТУРЫ
+# ===========================================
+
+def get_levels_kb() -> InlineKeyboardMarkup:
+    """Клавиатура выбора уровня."""
+    buttons = []
+    row = []
+    for lvl, data in LEVELS.items():
+        btn = InlineKeyboardButton(
+            text=f"{data['name']} ({data['amount']}$)",
+            callback_data=f"select_level:{lvl}"
+        )
+        row.append(btn)
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_board_detail_kb(table_id: int, user_position: Optional[str] = None) -> InlineKeyboardMarkup:
+    """Клавиатура деталей доски (как на референсе)."""
+    buttons = [
+        [InlineKeyboardButton(
+            text="🪻 Данные получателя",
+            callback_data=f"receiver_info:{table_id}"
+        )],
+        [InlineKeyboardButton(
+            text="👥 Показать команду доски",
+            callback_data=f"show_team:{table_id}"
+        )],
+        [InlineKeyboardButton(
+            text="🖼 Показать доску картинкой",
+            callback_data=f"show_board_image:{table_id}"
+        )],
+        [InlineKeyboardButton(
+            text="👤 Показать дарителей",
+            callback_data=f"show_donors:{table_id}"
+        )],
+        [InlineKeyboardButton(
+            text="🔄 Выбрать другую доску",
+            callback_data="back_to_levels"
+        )],
+    ]
+    
+    # Если пользователь даритель и не оплатил — добавляем кнопку оплаты
+    if user_position and user_position.startswith('d'):
+        buttons.insert(0, [InlineKeyboardButton(
+            text="💸 Отправить подарок",
+            callback_data=f"send_gift:{table_id}"
+        )])
+    
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def get_back_kb(table_id: int) -> InlineKeyboardMarkup:
+    """Кнопка возврата."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="🔙 Вернуться", callback_data=f"view_board:{table_id}")]
+    ])
+
+
+# ===========================================
+# ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ
+# ===========================================
+
+async def get_user_map(session, table: Table) -> Dict[int, str]:
+    """Получить словарь {tid: display_name} для всех участников доски."""
+    user_service = UserService(session)
+    
+    all_tids = [
+        table.rec, table.crl, table.crr,
+        table.stl1, table.stl2, table.str3, table.str4,
+        table.dl1, table.dl2, table.dl3, table.dl4,
+        table.dr5, table.dr6, table.dr7, table.dr8
+    ]
+    all_tids = [t for t in all_tids if t]
+    
+    user_map = {}
+    for tid in all_tids:
+        user = await user_service.get_by_tid(tid)
+        if user:
+            user_map[tid] = user.display_name
+        else:
+            user_map[tid] = f"ID:{tid}"
+    
+    return user_map
+
+
+def get_position_emoji(position: str) -> str:
+    """Эмодзи для позиции."""
+    emojis = {
+        'rec': '🎁',
+        'crl': '⭐', 'crr': '⭐',
+        'stl1': '🔨', 'stl2': '🔨', 'str3': '🔨', 'str4': '🔨',
+        'dl1': '🎀', 'dl2': '🎀', 'dl3': '🎀', 'dl4': '🎀',
+        'dr5': '🎀', 'dr6': '🎀', 'dr7': '🎀', 'dr8': '🎀',
+    }
+    return emojis.get(position, '❓')
+
+
+def get_position_name_ru(position: str) -> str:
+    """Название позиции на русском."""
+    names = {
+        'rec': 'Получатель',
+        'crl': 'Создатель', 'crr': 'Создатель',
+        'stl1': 'Строитель', 'stl2': 'Строитель', 
+        'str3': 'Строитель', 'str4': 'Строитель',
+        'dl1': 'Даритель', 'dl2': 'Даритель', 
+        'dl3': 'Даритель', 'dl4': 'Даритель',
+        'dr5': 'Даритель', 'dr6': 'Даритель', 
+        'dr7': 'Даритель', 'dr8': 'Даритель',
+    }
+    return names.get(position, 'Участник')
+
+
+# ===========================================
 # КОМАНДЫ
 # ===========================================
 
-@router.message(Command("boards"))
 @router.message(F.text == "📋 Мои доски")
-async def cmd_boards(message: Message) -> None:
+@router.message(Command("boards"))
+async def cmd_boards(message: Message):
     """Показать все доски пользователя в виде кнопок."""
     if not message.from_user:
         return
@@ -157,252 +262,328 @@ async def cmd_boards(message: Message) -> None:
         )
 
 
-@router.message(Command("levels"))
-@router.message(F.text == "🎯 Уровни")
-async def cmd_levels(message: Message) -> None:
-    """Показать все уровни досок."""
-    if not message.from_user:
-        return
-    
-    text = get_levels_message()
-    
-    await message.answer(
-        text,
-        parse_mode="HTML",
-        reply_markup=get_levels_kb(),
-    )
+# ===========================================
+# ПРОСМОТР ДОСКИ
+# ===========================================
 
-
-@router.message(Command("join"))
-async def cmd_join(message: Message, command: CommandObject) -> None:
-    """
-    Войти на доску уровня.
-    Использование: /join <level> или /join <level_name>
-    Примеры: /join 1, /join start, /join bronze
-    """
-    if not message.from_user:
+@router.callback_query(F.data.startswith("view_board:"))
+async def cb_view_board(callback: CallbackQuery):
+    """Показать детальную информацию о доске."""
+    if not callback.from_user or not callback.data:
         return
     
-    tid = message.from_user.id
-    
-    if not command.args:
-        await message.answer(
-            "📋 <b>Использование:</b>\n"
-            "<code>/join 1</code> — войти на Start (10$)\n"
-            "<code>/join 3</code> — войти на Bronze (40$)\n\n"
-            "Или выберите уровень:",
-            parse_mode="HTML",
-            reply_markup=get_levels_kb(),
-        )
-        return
-    
-    # Парсим уровень
-    level = parse_level(command.args.strip())
-    
-    if not level:
-        await message.answer(
-            f"❌ Неверный уровень: {command.args}\n\n"
-            "Используйте число 1-13 или название (start, bronze, gold...)",
-            parse_mode="HTML",
-        )
-        return
+    tid = callback.from_user.id
+    table_id = int(callback.data.split(":")[1])
     
     async with AsyncSessionLocal() as session:
         table_service = TableService(session)
         user_service = UserService(session)
         
-        user = await user_service.get_by_tid(tid)
-        if not user:
-            await message.answer("❌ Вы не зарегистрированы. Отправьте /start")
-            return
-        
-        # Проверяем можно ли присоединиться
-        can_join, reason = await table_service.can_user_join(tid, level)
-        
-        if not can_join:
-            await message.answer(
-                get_join_error_message(reason, level),
-                parse_mode="HTML",
-            )
-            return
-        
-        # Ищем подходящую доску
-        table, search_reason = await table_service.find_table_for_user(tid, level)
-        
-        if not table:
-            await message.answer(
-                f"😔 <b>Нет доступных досок</b>\n\n"
-                f"Уровень: {LEVELS[level]['name']} ({LEVELS[level]['amount']}$)\n"
-                f"Причина: {search_reason}\n\n"
-                f"Попробуйте позже или создайте свою доску.",
-                parse_mode="HTML",
-            )
-            return
-        
-        # Показываем подтверждение
-        level_info = LEVELS[level]
-        
-        await message.answer(
-            f"🎯 <b>Найдена доска!</b>\n\n"
-            f"Уровень: <b>{level_info['name']}</b>\n"
-            f"Сумма подарка: <b>{level_info['amount']} USDT</b>\n"
-            f"Доска: #{table.id}\n"
-            f"Свободных мест: {table.empty_slots_total}\n"
-            f"Найдена через: {search_reason}\n\n"
-            f"⏰ После входа у вас будет 72 часа на оплату.",
-            parse_mode="HTML",
-            reply_markup=get_confirm_join_kb(table.id, level),
-        )
-
-
-@router.message(Command("board"))
-async def cmd_board(message: Message, command: CommandObject) -> None:
-    """
-    Показать детали доски.
-    Использование: /board <id>
-    """
-    if not message.from_user:
-        return
-    
-    tid = message.from_user.id
-    
-    if not command.args or not command.args.isdigit():
-        await message.answer(
-            "📋 <b>Использование:</b>\n"
-            "<code>/board 123</code> — показать доску #123",
-            parse_mode="HTML",
-        )
-        return
-    
-    table_id = int(command.args)
-    
-    async with AsyncSessionLocal() as session:
-        table_service = TableService(session)
-        
         table = await table_service.get_by_id(table_id)
-        
-        if not table:
-            await message.answer(f"❌ Доска #{table_id} не найдена")
-            return
-        
-        position = await table_service.get_user_position(table, tid)
-        text = await get_board_detail_message(table, table_service, tid)
-        
-        await message.answer(
-            text,
-            parse_mode="HTML",
-            reply_markup=get_board_detail_kb(table, position),
-        )
-
-
-# ===========================================
-# CALLBACK HANDLERS
-# ===========================================
-
-@router.callback_query(F.data.startswith("join_level:"))
-async def callback_join_level(callback: CallbackQuery) -> None:
-    """Выбор уровня для входа."""
-    if not callback.from_user or not callback.data:
-        return
-    
-    tid = callback.from_user.id
-    level = int(callback.data.split(":")[1])
-    
-    async with AsyncSessionLocal() as session:
-        table_service = TableService(session)
-        
-        # Проверяем можно ли
-        can_join, reason = await table_service.can_user_join(tid, level)
-        
-        if not can_join:
-            await callback.answer(get_join_error_message(reason, level), show_alert=True)
-            return
-        
-        # Ищем доску
-        table, search_reason = await table_service.find_table_for_user(tid, level)
-        
-        if not table:
-            await callback.answer("😔 Нет доступных досок", show_alert=True)
-            return
-        
-        level_info = LEVELS[level]
-        
-        await callback.message.edit_text(
-            f"🎯 <b>Найдена доска!</b>\n\n"
-            f"Уровень: <b>{level_info['name']}</b>\n"
-            f"Сумма подарка: <b>{level_info['amount']} USDT</b>\n"
-            f"Доска: #{table.id}\n"
-            f"Свободных мест: {table.empty_slots_total}\n\n"
-            f"⏰ После входа у вас будет 72 часа на оплату.",
-            parse_mode="HTML",
-            reply_markup=get_confirm_join_kb(table.id, level),
-        )
-    
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("confirm_join:"))
-async def callback_confirm_join(callback: CallbackQuery) -> None:
-    """Подтверждение входа на доску."""
-    if not callback.from_user or not callback.data:
-        return
-    
-    tid = callback.from_user.id
-    table_id = int(callback.data.split(":")[1])
-    
-    async with AsyncSessionLocal() as session:
-        table_service = TableService(session)
-        
-        success, reason, slot = await table_service.join_table(table_id, tid)
-        
-        if not success:
-            await callback.answer(f"❌ {reason}", show_alert=True)
-            return
-        
-        table = await table_service.get_by_id(table_id)
-        position_name = await table_service.get_position_name(slot)
-        
-        await callback.message.edit_text(
-            get_join_success_message(table, slot, position_name),
-            parse_mode="HTML",
-            reply_markup=get_board_detail_kb(table, slot),
-        )
-    
-    await callback.answer("✅ Вы заняли место!")
-
-
-@router.callback_query(F.data.startswith("view_board:"))
-async def callback_view_board(callback: CallbackQuery) -> None:
-    """Просмотр деталей доски."""
-    if not callback.from_user or not callback.data:
-        return
-    
-    tid = callback.from_user.id
-    table_id = int(callback.data.split(":")[1])
-    
-    async with AsyncSessionLocal() as session:
-        table_service = TableService(session)
-        
-        table = await table_service.get_by_id(table_id)
-        
         if not table:
             await callback.answer("❌ Доска не найдена", show_alert=True)
             return
         
+        # Получаем позицию пользователя
         position = await table_service.get_user_position(table, tid)
-        text = await get_board_detail_message(table, table_service, tid)
+        position_name = get_position_name_ru(position) if position else "Наблюдатель"
+        
+        # Получаем информацию об уровне
+        level_info = LEVELS.get(table.level, {})
+        level_name = level_info.get('name', f'L{table.level}')
+        amount = level_info.get('amount', 0)
+        
+        # Подсчёт дарителей на доске
+        donors_count = sum([
+            1 for d in [table.dl1, table.dl2, table.dl3, table.dl4,
+                       table.dr5, table.dr6, table.dr7, table.dr8] if d
+        ])
+        
+        # Подсчёт партнёров пользователя на доске
+        user = await user_service.get_by_tid(tid)
+        referrals = await user_service.get_referrals(tid) if user else []
+        referral_tids = [r.tid for r in referrals]
+        
+        all_on_board = [
+            table.rec, table.crl, table.crr,
+            table.stl1, table.stl2, table.str3, table.str4,
+            table.dl1, table.dl2, table.dl3, table.dl4,
+            table.dr5, table.dr6, table.dr7, table.dr8
+        ]
+        partners_on_board = len([t for t in all_on_board if t in referral_tids])
+        
+        # Квалификация (упрощённо — есть ли рефералы)
+        qualification = "✅" if user and user.refscount > 0 else "❌"
+        
+        # Формируем сообщение как на референсе
+        text = (
+            f"➕ Доска - 💚 {level_name}\n"
+            f"🪻 ID доски: {table.id}\n"
+            f"👥 Дарителей на доске: {donors_count}\n"
+            f"🎁 Подтверждено: {table.gifts_received} из 8\n"
+            f"📍 Место: {position_name}\n"
+            f"🔑 Квалификация: {qualification}\n"
+            f"👫 Партнёров на доске: {partners_on_board}\n"
+            f"🔄 Пройдено досок: —"  # TODO: добавить счётчик
+        )
+        
+        kb = get_board_detail_kb(table.id, position)
+        
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
+    
+    await callback.answer()
+
+
+# ===========================================
+# ГЕНЕРАЦИЯ КАРТИНКИ ДОСКИ
+# ===========================================
+
+@router.callback_query(F.data.startswith("show_board_image:"))
+async def cb_show_board_image(callback: CallbackQuery):
+    """Показать доску картинкой с логинами."""
+    if not callback.from_user or not callback.data:
+        return
+    
+    tid = callback.from_user.id
+    table_id = int(callback.data.split(":")[1])
+    
+    await callback.answer("🖼 Генерирую картинку...")
+    
+    async with AsyncSessionLocal() as session:
+        table_service = TableService(session)
+        user_service = UserService(session)
+        
+        table = await table_service.get_by_id(table_id)
+        if not table:
+            await callback.answer("❌ Доска не найдена", show_alert=True)
+            return
+        
+        # Получаем имена всех участников
+        user_map = await get_user_map(session, table)
+        
+        # Получаем рефералов текущего пользователя
+        referrals = await user_service.get_referrals(tid)
+        referral_tids = [r.tid for r in referrals]
+        
+        # Генерируем изображение
+        image_service = get_board_image_service()
+        image_bytes = await image_service.generate_board_image(
+            table=table,
+            user_map=user_map,
+            current_user_tid=tid,
+            referral_tids=referral_tids,
+        )
+        
+        # Отправляем как фото
+        level_info = LEVELS.get(table.level, {})
+        caption = (
+            f"➕ Обозначения на доске:\n"
+            f"🔴 Красный цвет - ваш логин\n"
+            f"🔵 Синий цвет - ваша 1-я линия"
+        )
+        
+        photo = BufferedInputFile(image_bytes.read(), filename=f"board_{table_id}.png")
+        
+        await callback.message.answer_photo(
+            photo=photo,
+            caption=caption,
+            reply_markup=get_back_kb(table_id),
+            parse_mode="HTML"
+        )
+
+
+# ===========================================
+# ДАННЫЕ ПОЛУЧАТЕЛЯ
+# ===========================================
+
+@router.callback_query(F.data.startswith("receiver_info:"))
+async def cb_receiver_info(callback: CallbackQuery):
+    """Показать данные получателя доски."""
+    if not callback.from_user or not callback.data:
+        return
+    
+    table_id = int(callback.data.split(":")[1])
+    
+    async with AsyncSessionLocal() as session:
+        table_service = TableService(session)
+        user_service = UserService(session)
+        
+        table = await table_service.get_by_id(table_id)
+        if not table or not table.rec:
+            await callback.answer("❌ Получатель не найден", show_alert=True)
+            return
+        
+        receiver = await user_service.get_by_tid(table.rec)
+        if not receiver:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        
+        level_info = LEVELS.get(table.level, {})
+        
+        text = (
+            f"🎁 <b>Данные получателя</b>\n\n"
+            f"👤 Имя: {receiver.display_name}\n"
+            f"🆔 Username: @{receiver.username or '—'}\n"
+            f"💼 Кошелёк: <code>{receiver.wallet_address or 'Не указан'}</code>\n\n"
+            f"💰 Сумма подарка: <b>{level_info.get('amount', 0)} USDT</b>"
+        )
         
         await callback.message.edit_text(
             text,
-            parse_mode="HTML",
-            reply_markup=get_board_detail_kb(table, position),
+            reply_markup=get_back_kb(table_id),
+            parse_mode="HTML"
         )
     
     await callback.answer()
 
 
+# ===========================================
+# ПОКАЗАТЬ КОМАНДУ ДОСКИ
+# ===========================================
+
+@router.callback_query(F.data.startswith("show_team:"))
+async def cb_show_team(callback: CallbackQuery):
+    """Показать всех участников доски."""
+    if not callback.from_user or not callback.data:
+        return
+    
+    table_id = int(callback.data.split(":")[1])
+    
+    async with AsyncSessionLocal() as session:
+        table_service = TableService(session)
+        
+        table = await table_service.get_by_id(table_id)
+        if not table:
+            await callback.answer("❌ Доска не найдена", show_alert=True)
+            return
+        
+        user_map = await get_user_map(session, table)
+        
+        def format_slot(slot_name: str, tid: Optional[int], is_paid: bool = False) -> str:
+            emoji = get_position_emoji(slot_name)
+            pos_name = get_position_name_ru(slot_name)
+            if tid:
+                name = user_map.get(tid, f"ID:{tid}")
+                status = "✅" if is_paid else "⏳" if slot_name.startswith('d') else ""
+                return f"{emoji} {pos_name}: {name} {status}"
+            else:
+                return f"{emoji} {pos_name}: <i>Свободно</i>"
+        
+        lines = [
+            f"👥 <b>Команда доски #{table_id}</b>\n",
+            format_slot('rec', table.rec),
+            "",
+            "<b>Создатели:</b>",
+            format_slot('crl', table.crl),
+            format_slot('crr', table.crr),
+            "",
+            "<b>Строители:</b>",
+            format_slot('stl1', table.stl1),
+            format_slot('stl2', table.stl2),
+            format_slot('str3', table.str3),
+            format_slot('str4', table.str4),
+            "",
+            "<b>Дарители:</b>",
+            format_slot('dl1', table.dl1, table.dl1_pay),
+            format_slot('dl2', table.dl2, table.dl2_pay),
+            format_slot('dl3', table.dl3, table.dl3_pay),
+            format_slot('dl4', table.dl4, table.dl4_pay),
+            format_slot('dr5', table.dr5, table.dr5_pay),
+            format_slot('dr6', table.dr6, table.dr6_pay),
+            format_slot('dr7', table.dr7, table.dr7_pay),
+            format_slot('dr8', table.dr8, table.dr8_pay),
+        ]
+        
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=get_back_kb(table_id),
+            parse_mode="HTML"
+        )
+    
+    await callback.answer()
+
+
+# ===========================================
+# ПОКАЗАТЬ ДАРИТЕЛЕЙ
+# ===========================================
+
+@router.callback_query(F.data.startswith("show_donors:"))
+async def cb_show_donors(callback: CallbackQuery):
+    """Показать только дарителей с их статусами."""
+    if not callback.from_user or not callback.data:
+        return
+    
+    table_id = int(callback.data.split(":")[1])
+    
+    async with AsyncSessionLocal() as session:
+        table_service = TableService(session)
+        
+        table = await table_service.get_by_id(table_id)
+        if not table:
+            await callback.answer("❌ Доска не найдена", show_alert=True)
+            return
+        
+        user_map = await get_user_map(session, table)
+        
+        donors = [
+            ('dl1', table.dl1, table.dl1_pay, 'Левая'),
+            ('dl2', table.dl2, table.dl2_pay, 'Левая'),
+            ('dl3', table.dl3, table.dl3_pay, 'Левая'),
+            ('dl4', table.dl4, table.dl4_pay, 'Левая'),
+            ('dr5', table.dr5, table.dr5_pay, 'Правая'),
+            ('dr6', table.dr6, table.dr6_pay, 'Правая'),
+            ('dr7', table.dr7, table.dr7_pay, 'Правая'),
+            ('dr8', table.dr8, table.dr8_pay, 'Правая'),
+        ]
+        
+        lines = [f"👤 <b>Дарители доски #{table_id}</b>\n"]
+        
+        # Левая сторона
+        lines.append("<b>◀️ Левая сторона:</b>")
+        for slot, tid, is_paid, side in donors[:4]:
+            if tid:
+                name = user_map.get(tid, f"ID:{tid}")
+                status = "✅ Оплачено" if is_paid else "⏳ Ожидание"
+                lines.append(f"  {name} — {status}")
+            else:
+                lines.append(f"  <i>Свободно</i>")
+        
+        # Правая сторона
+        lines.append("\n<b>▶️ Правая сторона:</b>")
+        for slot, tid, is_paid, side in donors[4:]:
+            if tid:
+                name = user_map.get(tid, f"ID:{tid}")
+                status = "✅ Оплачено" if is_paid else "⏳ Ожидание"
+                lines.append(f"  {name} — {status}")
+            else:
+                lines.append(f"  <i>Свободно</i>")
+        
+        await callback.message.edit_text(
+            "\n".join(lines),
+            reply_markup=get_back_kb(table_id),
+            parse_mode="HTML"
+        )
+    
+    await callback.answer()
+
+
+# ===========================================
+# ВЫБОР УРОВНЯ И ВХОД
+# ===========================================
+
+@router.callback_query(F.data == "back_to_levels")
+async def cb_back_to_levels(callback: CallbackQuery):
+    """Вернуться к выбору уровня."""
+    await callback.message.edit_text(
+        "🚀 <b>Выберите уровень доски:</b>",
+        reply_markup=get_levels_kb(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.startswith("level_info:"))
-async def callback_level_info(callback: CallbackQuery) -> None:
+async def cb_level_info(callback: CallbackQuery):
     """Информация о недоступном уровне."""
     if not callback.from_user or not callback.data:
         return
@@ -440,188 +621,89 @@ async def callback_level_info(callback: CallbackQuery) -> None:
     await callback.answer(text, show_alert=True)
 
 
-@router.callback_query(F.data.startswith("leave_board:"))
-async def callback_leave_board(callback: CallbackQuery) -> None:
-    """Покинуть доску."""
+@router.callback_query(F.data.startswith("select_level:"))
+async def cb_select_level(callback: CallbackQuery):
+    """Выбор уровня — показать инфо или войти."""
     if not callback.from_user or not callback.data:
         return
     
     tid = callback.from_user.id
-    table_id = int(callback.data.split(":")[1])
+    level = int(callback.data.split(":")[1])
     
     async with AsyncSessionLocal() as session:
         table_service = TableService(session)
         
-        success, reason = await table_service.leave_table(table_id, tid)
+        # Проверяем есть ли уже доска на этом уровне
+        user_tables = await table_service.get_user_tables(tid)
+        existing = next((t for t in user_tables if t.level == level), None)
         
-        if not success:
-            error_messages = {
-                "TABLE_NOT_FOUND": "Доска не найдена",
-                "ALREADY_PAID": "Нельзя покинуть после оплаты",
-                "NOT_A_DONOR": "Вы не даритель на этой доске",
-            }
-            msg = error_messages.get(reason, reason)
-            await callback.answer(f"❌ {msg}", show_alert=True)
-            return
-        
-        await callback.message.edit_text(
-            f"✅ <b>Вы покинули доску #{table_id}</b>\n\n"
-            f"Место освобождено для другого участника.",
-            parse_mode="HTML",
-        )
-    
-    await callback.answer("✅ Вы покинули доску")
-
-
-@router.callback_query(F.data == "back_to_levels")
-async def callback_back_to_levels(callback: CallbackQuery) -> None:
-    """Вернуться к списку уровней."""
-    text = get_levels_message()
-    
-    await callback.message.edit_text(
-        text,
-        parse_mode="HTML",
-        reply_markup=get_levels_kb(),
-    )
-    
-    await callback.answer()
-
-
-@router.callback_query(F.data == "back_to_boards")
-async def callback_back_to_boards(callback: CallbackQuery) -> None:
-    """Вернуться к списку досок."""
-    if not callback.from_user:
-        return
-    
-    tid = callback.from_user.id
-    
-    async with AsyncSessionLocal() as session:
-        table_service = TableService(session)
-        
-        tables = await table_service.get_user_tables(tid, active_only=True)
-        
-        if not tables:
-            await callback.message.edit_text(
-                get_no_boards_message(),
-                parse_mode="HTML",
-                reply_markup=get_levels_kb(),
-            )
+        if existing:
+            # Показываем существующую доску
+            callback.data = f"view_board:{existing.id}"
+            await cb_view_board(callback)
         else:
-            text = await get_boards_list_message(tables, table_service, tid)
+            # Предлагаем войти
+            level_info = LEVELS.get(level, {})
             
-            await callback.message.edit_text(
-                text,
-                parse_mode="HTML",
-                reply_markup=get_boards_list_kb(tables),
+            kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(
+                    text="🚀 Активировать доску",
+                    callback_data=f"join_level:{level}"
+                )],
+                [InlineKeyboardButton(
+                    text="🔙 Назад",
+                    callback_data="back_to_levels"
+                )]
+            ])
+            
+            text = (
+                f"🌟 <b>Уровень {level}: {level_info.get('name', '')}</b>\n"
+                f"🎁 Сумма подарка: <b>{level_info.get('amount', 0)} USDT</b>\n\n"
+                f"Вы пока не участвуете на этом уровне.\n"
+                f"Хотите занять место?"
             )
+            
+            await callback.message.edit_text(text, reply_markup=kb, parse_mode="HTML")
     
     await callback.answer()
 
 
-@router.callback_query(F.data.startswith("split_board:"))
-async def callback_split_board(callback: CallbackQuery) -> None:
-    """Разделить доску на левую или правую сторону."""
+@router.callback_query(F.data.startswith("join_level:"))
+async def cb_join_level(callback: CallbackQuery):
+    """Войти на доску уровня."""
     if not callback.from_user or not callback.data:
         return
     
     tid = callback.from_user.id
-    
-    # Парсим данные: split_board:table_id:side
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer("❌ Неверный формат команды", show_alert=True)
-        return
-    
-    try:
-        table_id = int(parts[1])
-        side = parts[2]  # 'left' или 'right'
-    except (ValueError, IndexError):
-        await callback.answer("❌ Ошибка парсинга данных", show_alert=True)
-        return
-    
-    if side not in ["left", "right"]:
-        await callback.answer("❌ Неверная сторона (должно быть left или right)", show_alert=True)
-        return
+    level = int(callback.data.split(":")[1])
     
     async with AsyncSessionLocal() as session:
         table_service = TableService(session)
-        user_service = UserService(session)
         
-        # Проверяем что пользователь — получатель на этой доске
-        table = await table_service.get_by_id(table_id)
+        # Ищем доску
+        table, reason = await table_service.find_table_for_user(tid, level)
+        
         if not table:
-            await callback.answer("❌ Доска не найдена", show_alert=True)
+            await callback.answer(
+                f"❌ Нет доступных досок. Код: {reason}",
+                show_alert=True
+            )
             return
         
-        if table.rec != tid:
-            await callback.answer("❌ Только получатель может разделить доску", show_alert=True)
-            return
+        # Пробуем войти
+        success, join_result, slot = await table_service.join_table(table.id, tid)
         
-        # Проверяем готовность стороны
-        if side == "left" and not table.can_split_left:
-            await callback.answer("❌ Левая сторона ещё не готова к разделению", show_alert=True)
-            return
-        if side == "right" and not table.can_split_right:
-            await callback.answer("❌ Правая сторона ещё не готова к разделению", show_alert=True)
-            return
-        
-        # Разделяем доску
-        try:
-            success, reason, new_table = await table_service.split_table(table_id, side)
-            
-            if not success:
-                await callback.answer(f"❌ Ошибка: {reason}", show_alert=True)
-                return
-        except Exception as e:
-            logger.error(f"Ошибка при разделении доски #{table_id}: {e}", exc_info=True)
-            await alert(f"Ошибка при разделении доски table_id={table_id} user={tid}: {e}")
-            await callback.answer("❌ Произошла ошибка при разделении доски", show_alert=True)
-            return
-        
-        level_info = LEVELS.get(table.level, {})
-        level_name = level_info.get("name", f"L{table.level}")
-        
-        # Обновляем сообщение
-        text = (
-            f"✂️ <b>Доска разделена!</b>\n\n"
-            f"Родительская доска: <b>#{table_id}</b>\n"
-            f"Новая доска: <b>#{new_table.id}</b>\n"
-            f"Уровень: <b>{level_name}</b>\n"
-            f"Сторона: <b>{side}</b>\n\n"
-            f"🎉 Новая доска создана и готова к заполнению!"
-        )
-        
-        await callback.message.edit_text(
-            text,
-            parse_mode="HTML",
-            reply_markup=get_board_detail_kb(table, "rec"),
-        )
-        
-        await callback.answer("✅ Доска успешно разделена!")
-        
-        logger.info(f"Доска #{table_id} разделена на сторону {side}, создана доска #{new_table.id}")
-
-
-# ===========================================
-# УТИЛИТЫ
-# ===========================================
-
-def parse_level(arg: str) -> Optional[int]:
-    """
-    Парсит уровень из строки.
-    Принимает: число (1-13) или название (start, bronze, gold...)
-    """
-    # Пробуем как число
-    if arg.isdigit():
-        level = int(arg)
-        if 1 <= level <= 13:
-            return level
-        return None
-    
-    # Пробуем как название
-    arg_lower = arg.lower()
-    for level_num, info in LEVELS.items():
-        if info["name"].lower() == arg_lower:
-            return level_num
-    
-    return None
+        if success:
+            await callback.answer("✅ Вы заняли место!", show_alert=True)
+            # Показываем доску
+            callback.data = f"view_board:{table.id}"
+            await cb_view_board(callback)
+        else:
+            error_map = {
+                JoinResult.USER_ALREADY_ON_LEVEL.value: "Вы уже на этом уровне!",
+                JoinResult.USER_BLOCKED.value: "Вы заблокированы!",
+                JoinResult.NO_SLOTS.value: "Места закончились!",
+                JoinResult.TABLE_CLOSED.value: "Доска закрыта!",
+            }
+            error_text = error_map.get(join_result, f"Ошибка: {join_result}")
+            await callback.answer(f"❌ {error_text}", show_alert=True)
