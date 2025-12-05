@@ -1,0 +1,613 @@
+# GLEB'S CODING STYLE RULES
+# Telegram Bot Project: "Дари Получай" (Give & Receive)
+# Stack: Python 3.10+ | aiogram 3.x | SQLAlchemy 2.0 async | PostgreSQL
+
+# ============================================================================
+# CRITICAL: Follow these rules EXACTLY. No exceptions.
+# ============================================================================
+
+## ARCHITECTURE
+
+### Project Structure
+```
+project/
+├── bot_instance.py      # Bot and i18n singletons (NEVER modify)
+├── config.py            # Constants: LOGCHAT, SEPARATIONBLOCK, SERVICES
+├── database.py          # Base + async_sessionmaker
+├── models/              # SQLAlchemy models ONLY (no business logic)
+│   ├── user.py
+│   ├── tables.py
+│   └── timers.py
+├── services/            # Service classes (ALL business logic here)
+│   ├── user_service.py
+│   ├── table_service.py
+│   └── *_service.py
+├── utils/               # Helper functions
+│   ├── *_utils.py
+│   └── send_message_utils.py
+├── handlers/            # Aiogram routers (call services, never DB directly)
+├── keyboards/           # Inline/Reply keyboards
+├── texts/               # Localized text templates
+└── schemas/             # Pydantic schemas
+```
+
+### Design Pattern: Service Layer
+- Every service is a class with `__init__(self, db: AsyncSession)`
+- Handlers NEVER access database directly — always through Services
+- One service = one domain (User, Table, Timer, Academy)
+- Commit INSIDE service methods
+
+---
+
+## NAMING CONVENTIONS (STRICT)
+
+| Element          | Style         | Examples                                    |
+|------------------|---------------|---------------------------------------------|
+| Variables        | snake_case    | `user_data`, `table_id`, `timer_end`        |
+| Functions        | snake_case    | `get_user`, `create_table_record`           |
+| Async functions  | snake_case    | `async def get_user_with_sit_data`          |
+| Classes          | PascalCase    | `UserService`, `TableService`               |
+| SQLAlchemy models| PascalCase    | `User`, `Tables`, `UserSitData`             |
+| Constants        | UPPER_SNAKE   | `PAGE_SIZE`, `SEPARATIONBLOCK`, `LOGCHAT`   |
+| Private methods  | _prefix       | `_get_count_dar`, `_normalize_range`        |
+
+### Gleb's Specific Naming Patterns
+```python
+# Loaded data objects → always {entity}_data
+user_data = await self.get_user(tid=tid)
+table_data = await self.get_table_by_table_id(table_id=table_id)
+rec_data = table.rec_data
+
+# Query result → always "result"
+result = await self.db.execute(select(...))
+
+# Telegram ID → always "tid" (NEVER "user_id")
+async def get_user(self, tid: int):
+
+# Payment flags → ispay{level}
+ispaystart, ispaybronz, ispaysilver, ispaygold
+
+# Status fields → mystatus{level}
+mystatusstart, mystatusbronz, mystatussilver
+
+# Table position fields → nowsit{level}table
+nowsitstarttable, nowsitbronztable
+
+# Database columns → often concatenated without underscores
+canstarttable, ispaygold, regtype, timecours
+```
+
+---
+
+## CODE FORMATTING (STRICT)
+
+- Indentation: **4 spaces** (never tabs)
+- Quotes: **double quotes** `"` everywhere
+- Semicolons: **never**
+- Trailing commas: **always** in multiline structures
+- Max line length: **88-100 characters** (Black default)
+- Blank lines: **one** between methods, **two** between classes
+
+### Import Order
+```python
+# 1. Standard library
+import time
+from datetime import datetime, timedelta
+from typing import Any, List, Optional, Tuple
+
+# 2. Third-party
+from aiogram import Bot
+from icecream import ic
+from sqlalchemy import and_, func, select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload, selectinload
+
+# 3. Local imports
+from bot_instance import bot, i18n
+from config import LOGCHAT, SEPARATIONBLOCK
+from models.tables import Tables
+from models.user import User
+from services.user_service import UserService
+from texts.tables import TablesTexts
+```
+
+---
+
+## TYPE HINTS (REQUIRED)
+
+Use Python 3.10+ syntax:
+```python
+# Union with | (NOT Optional[])
+async def get_user(self, tid: int) -> User | None:
+
+# Lists
+async def get_users(self) -> list[User]:
+
+# Dicts
+async def get_counts(self) -> dict[str, int]:
+
+# Tuples
+def normalize(a: int, b: int) -> tuple[int, int]:
+
+# Complex types from typing
+from typing import Any, List, Optional, Sequence, Tuple
+```
+
+---
+
+## ASYNC/AWAIT (100% ASYNC)
+
+ALL I/O operations MUST be async:
+```python
+# ✅ CORRECT - Gleb's style
+async def get_user(self, tid: int) -> User | None:
+    result = await self.db.execute(select(User).where(User.tid == tid))
+    return result.scalars().first()
+
+# ✅ CORRECT - Even simple utilities if used in async context
+async def user_login_without_base(tid: int, login=None):
+    text = login if login else "Без ника"
+    return f'<a href="tg://user?id={tid}">@{text}</a>'
+
+# ✅ EXCEPTION - Pure computational helpers (no I/O)
+@staticmethod
+def _normalize_range(a: int, b: int) -> tuple[int, int]:
+    return (a, b) if a <= b else (b, a)
+```
+
+---
+
+## SQLALCHEMY PATTERNS (CRITICAL)
+
+### Model Definition
+```python
+from datetime import datetime
+from sqlalchemy import TIMESTAMP, BigInteger, Boolean, Column, String
+from sqlalchemy.orm import relationship
+from database import Base
+
+class User(Base):
+    __tablename__ = "users"
+    __table_args__ = {"extend_existing": True}  # ALWAYS INCLUDE THIS
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tid = Column(BigInteger, unique=True, nullable=False)
+    login = Column(String(100))
+    ispaystart = Column(Boolean, unique=False, default=False)
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    updated_at = Column(TIMESTAMP, onupdate=datetime.utcnow)
+```
+
+### Relationships (Gleb's Pattern)
+```python
+# Self-referential with lambda
+nastavnik = relationship(
+    "User",
+    uselist=False,
+    foreign_keys=[isref],
+    primaryjoin=lambda: and_(foreign(User.isref) == remote(User.tid)),
+    viewonly=True,
+)
+
+# With filter condition
+table_start = relationship(
+    "Tables",
+    uselist=False,
+    foreign_keys=[nowsitstarttable],
+    primaryjoin="and_(User.nowsitstarttable == Tables.tableid, Tables.isopentable == True)",
+    viewonly=True,
+)
+```
+
+### SELECT Queries
+```python
+# Simple select
+result = await self.db.execute(select(User).where(User.tid == tid))
+return result.scalars().first()
+
+# With eager loading (ALWAYS use for related data)
+result = await self.db.execute(
+    select(User)
+    .where(User.tid == tid)
+    .options(joinedload(User.nastavnik))
+    .options(joinedload(User.sit_data))
+)
+
+# Multiple selectinload for collections
+result = await self.db.execute(
+    select(Tables)
+    .where(Tables.tableid == table_id)
+    .options(
+        selectinload(Tables.dl1_data).selectinload(User.sit_data),
+        selectinload(Tables.dl1_data).selectinload(User.nastavnik),
+    )
+)
+```
+
+### UPDATE Queries
+```python
+# Via ORM object (simple cases)
+user = await self.get_user(tid=tid)
+if user:
+    user.value1 = new_value
+    await self.db.commit()
+
+# Via bulk update with **kwargs (preferred for multiple fields)
+async def update_table(self, tableid: str, **kwargs):
+    if not kwargs:
+        return
+    query = (
+        update(Tables)
+        .where(Tables.tableid == tableid)
+        .values(**kwargs)
+        .execution_options(synchronize_session="fetch")
+    )
+    await self.db.execute(query)
+    await self.db.commit()
+```
+
+### INSERT Queries
+```python
+new_table = Tables(name=name, tableid=new_tableid, dateopen=time.time())
+self.db.add(new_table)
+try:
+    await self.db.commit()
+except IntegrityError as e:
+    await self.db.rollback()
+    raise e
+return new_table
+```
+
+### Existence Check Pattern
+```python
+async def user_exists(self, tid: int) -> bool:
+    user = await self.get_user(tid=tid)
+    return user is not None
+```
+
+---
+
+## ERROR HANDLING
+
+### Telegram API Errors
+```python
+try:
+    await bot.send_message(chat_id=user_tid, text=text)
+except Exception as e:
+    await alert(text=LogsTexts.user_block_bot(tid=str(user_tid), e=str(e)))
+```
+
+### Database Errors
+```python
+try:
+    await self.db.commit()
+except IntegrityError as e:
+    await self.db.rollback()
+    raise e
+```
+
+### Alert Function (Always Use)
+```python
+async def alert(text: str):
+    try:
+        await bot.send_message(chat_id=LOGCHAT, text=text)
+    except Exception as e:
+        print(f"Ошибка при отправке сообщения в LOGCHAT: {e}")
+```
+
+---
+
+## COMMENTS AND DOCUMENTATION
+
+### Comments Style
+```python
+# Комментарии ВСЕГДА на РУССКОМ языке
+# Считаем, сколько из полей не None
+count = sum(1 for value in row if value is not None)
+
+# INFO: для пояснений
+# INFO: Тут сменил с tid на isref
+
+# TODO: для будущих задач
+# TODO: Добавить лог в чат логов
+# TODO: @glebkhyl пересмотри
+
+# BUG TODO: для известных багов
+# BUG TODO: rec_data.timer1 is not defined. Надо бы поправить
+```
+
+### Docstrings (RARE, only for public APIs)
+```python
+async def create_temporary_invite_link(
+    channel_id: int, 
+    member_limit: int = 1, 
+    expire_seconds: int = 900
+) -> str:
+    """
+    Создает временную ссылку на канал с ограничением по времени.
+
+    Args:
+        channel_id (int): ID канала.
+        member_limit (int): Максимальное количество пользователей.
+        expire_seconds (int): Время жизни ссылки в секундах.
+
+    Returns:
+        str: Ссылка приглашения на канал.
+    """
+```
+
+---
+
+## GLEB'S SPECIFIC PATTERNS
+
+### Dynamic Attribute Access
+```python
+# getattr for dynamic field access
+field_name = f"ispay{level}"
+if hasattr(User, field_name):
+    stmt = select(func.count()).where(getattr(User, field_name) == True)
+
+# setattr for dynamic updates
+table_field = f"nowsit{table_type}table"
+setattr(user_information, table_field, None)
+```
+
+### Configuration Dictionaries
+```python
+# Level to field mapping
+gift_cells = {
+    "start": "stgifts",
+    "tin": "tingifts",
+    "bronz": "brogifts",
+    "copper": "copgifts",
+    "silver": "silgifts",
+    "amber": "ambgifts",
+    "gold": "gldgifts",
+    "ruby": "rubgifts",
+    "platin": "pltgifts",
+    "emerald": "emergifts",
+    "brilliant": "brlgifts",
+    "sapphire": "sappgifts",
+    "titan": "titgifts",
+}
+```
+
+### Position Lists
+```python
+left_positions = ["dl1", "dl2", "dl3", "dl4", "stl1", "stl2", "crl1"]
+right_positions = ["dr5", "dr6", "dr7", "dr8", "str3", "str4", "crr2"]
+donor_fields = ["dl1", "dl2", "dl3", "dl4", "dr5", "dr6", "dr7", "dr8"]
+```
+
+### Iteration with Check Pattern
+```python
+for field in ["dl1", "dl2", "dl3", "dl4", "stl1", "stl2", "crl1"]:
+    tid = getattr(table, field, None)
+    if tid and tid != user_tid:
+        tids.add(tid)
+```
+
+### Timestamp Pattern
+```python
+import time
+
+current_timestamp = int(time.time())
+cutoff = now_ts - days * 86400  # 86400 seconds in a day
+timer_time = int(time.time()) + 86400 * 3  # 3 days
+```
+
+### Debug Pattern
+```python
+from icecream import ic
+
+# Use ic() instead of print() for debugging
+ic(user_data)
+ic(table_data.tableid)
+```
+
+---
+
+## SERVICE CLASS TEMPLATE
+
+```python
+import time
+from typing import Optional
+
+from sqlalchemy import select, update
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
+
+from models.user import User
+from models.tables import Tables
+
+
+class NewFeatureService:
+
+    def __init__(self, db: AsyncSession):
+        self.db = db
+
+    async def get_user_with_table(self, tid: int, table_type: str) -> tuple:
+        """Получает пользователя с данными доски."""
+        result = await self.db.execute(
+            select(User)
+            .where(User.tid == tid)
+            .options(joinedload(User.sit_data))
+            .options(joinedload(User.nastavnik))
+        )
+        user = result.scalars().first()
+
+        table_field = f"nowsit{table_type}table"
+        table_id = getattr(user, table_field, None) if user else None
+
+        table = None
+        if table_id:
+            result_table = await self.db.execute(
+                select(Tables)
+                .where(Tables.tableid == table_id)
+                .options(joinedload(Tables.rec_data))
+            )
+            table = result_table.scalars().first()
+
+        return user, table
+
+    async def process_action(
+        self,
+        tid: int,
+        table_type: str,
+        amount: int,
+    ) -> bool:
+        user_data, table_data = await self.get_user_with_table(
+            tid=tid, table_type=table_type
+        )
+
+        if not user_data or not table_data:
+            return False
+
+        # Находим позицию
+        donor_positions = ["dl1", "dl2", "dl3", "dl4", "dr5", "dr6", "dr7", "dr8"]
+        user_position = None
+
+        for pos in donor_positions:
+            if getattr(table_data, pos) == tid:
+                user_position = pos
+                break
+
+        if not user_position:
+            # TODO: Добавить лог в чат логов
+            return False
+
+        # Обновляем через **kwargs
+        pay_field = f"{user_position}pay"
+        timer_field = f"{user_position}timer"
+
+        await self.update_table(
+            tableid=table_data.tableid,
+            **{pay_field: True, timer_field: int(time.time())},
+        )
+
+        return True
+
+    async def update_table(self, tableid: str, **kwargs):
+        if not kwargs:
+            return
+        query = (
+            update(Tables)
+            .where(Tables.tableid == tableid)
+            .values(**kwargs)
+            .execution_options(synchronize_session="fetch")
+        )
+        await self.db.execute(query)
+        await self.db.commit()
+
+    async def update_user(self, tid: int, **kwargs):
+        if not kwargs:
+            return
+        query = (
+            update(User)
+            .where(User.tid == tid)
+            .values(**kwargs)
+            .execution_options(synchronize_session="fetch")
+        )
+        await self.db.execute(query)
+        await self.db.commit()
+
+    @staticmethod
+    def _get_gift_field(table_type: str) -> str:
+        gift_fields = {
+            "start": "stgifts",
+            "tin": "tingifts",
+            "bronz": "brogifts",
+            "copper": "copgifts",
+            "silver": "silgifts",
+            "amber": "ambgifts",
+            "gold": "gldgifts",
+            "ruby": "rubgifts",
+            "platin": "pltgifts",
+            "emerald": "emergifts",
+            "brilliant": "brlgifts",
+            "sapphire": "sappgifts",
+            "titan": "titgifts",
+        }
+        return gift_fields.get(table_type, "stgifts")
+```
+
+---
+
+## MODEL TEMPLATE
+
+```python
+from datetime import datetime
+
+from sqlalchemy import (
+    TIMESTAMP,
+    BigInteger,
+    Boolean,
+    Column,
+    Integer,
+    String,
+    ForeignKey,
+)
+from sqlalchemy.orm import relationship
+
+from database import Base
+
+
+class NewModel(Base):
+    __tablename__ = "new_models"
+    __table_args__ = {"extend_existing": True}
+
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    tid = Column(BigInteger, ForeignKey("users.tid"), nullable=False)
+    
+    # Слитное именование для специфичных полей
+    amountusdt = Column(BigInteger, default=0)
+    isconfirmed = Column(Boolean, default=False)
+    
+    # Стандартные поля
+    created_at = Column(TIMESTAMP, default=datetime.utcnow)
+    updated_at = Column(TIMESTAMP, onupdate=datetime.utcnow)
+
+    # Relationships
+    user = relationship(
+        "User",
+        foreign_keys=[tid],
+        viewonly=True,
+    )
+```
+
+---
+
+## ANTI-PATTERNS (NEVER DO)
+
+❌ Synchronous database calls
+❌ Raw SQL (always use SQLAlchemy ORM)
+❌ Global variables for state
+❌ Relative imports
+❌ user_id instead of tid
+❌ Single quotes for strings
+❌ Tabs for indentation
+❌ Missing __table_args__ = {"extend_existing": True}
+❌ English comments (use Russian)
+❌ print() for debugging (use ic() or alert())
+❌ Accessing database from handlers directly
+
+---
+
+## QUICK CHECKLIST
+
+✅ 4 spaces, double quotes, no semicolons
+✅ snake_case for everything except classes (PascalCase)
+✅ Every service is a class with `db: AsyncSession`
+✅ Full type hints + rare docstrings in Russian
+✅ `await db.execute(...)` → `.scalars().first()`
+✅ `try/except Exception → alert()`
+✅ `ic()` for debugging
+✅ `selectinload` / `joinedload` for eager loading
+✅ `**kwargs` for bulk updates
+✅ `time.time()` for timestamps
+✅ Comments in Russian
+✅ `__table_args__ = {"extend_existing": True}` in every model
+
+---
+
+# If you follow these rules exactly, Gleb won't be able to tell your code from his.

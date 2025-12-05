@@ -1,0 +1,61 @@
+---
+alwaysApply: true
+---
+# PROJECT: Dari Poluchay Smart
+# Blockchain P2P gift exchange platform on TON
+
+## Project overview
+- Telegram Mini App for crypto gift exchange
+- 13 levels of boards (Start $10 → Titan $40,960)
+- 15-person matrix boards with roles: Receiver, Creators, Builders, Donors
+- Smart contracts handle USDT transfers automatically
+
+## Tech stack
+- Blockchain: TON (The Open Network)
+- Token: USDT on TON
+- Smart contracts: Tact language
+- Backend: Python 3.10+ | FastAPI | aiogram 3.x
+- Database: PostgreSQL + SQLAlchemy 2.0 async
+- Frontend: Telegram Mini App (React + TypeScript)
+- Wallet: TON Connect integration
+
+## Architecture
+- Pattern: Service Layer (services/*.py)
+- Models: SQLAlchemy declarative (models/*.py)
+- No business logic in models — only in services
+- Handlers call services, never DB directly
+
+## Database conventions
+- Every model MUST have: __table_args__ = {"extend_existing": True}
+- IDs and foreign keys: BigInteger
+- Telegram ID field: "tid" (never "user_id")
+- Timestamps: use time.time() as int
+- Payment flags: ispay{level} (ispaystart, ispaybronz...)
+- Status fields: mystatus{level}
+- Table position: nowsit{level}table
+
+## Board positions (15 total)
+- Receiver (1): rec
+- Creators (2): crl1, crr2
+- Builders (4): stl1, stl2, str3, str4
+- Donors (8): dl1, dl2, dl3, dl4, dr5, dr6, dr7, dr8
+- Left side: dl1, dl2, dl3, dl4, stl1, stl2, crl1
+- Right side: dr5, dr6, dr7, dr8, str3, str4, crr2
+
+## Level names mapping
+start, tin, bronz, copper, silver, amber, gold, ruby, platin, emerald, brilliant, sapphire, titan
+
+## Key patterns
+- Dynamic field access: getattr(obj, f"ispay{level}")
+- Bulk updates: update(Model).values(**kwargs)
+- Eager loading: always use joinedload/selectinload
+- Error handling: try/except → alert() to log chat
+- Debug: ic() from icecream, never print()
+
+## Smart contract notes
+- Escrow pattern for gifts
+- Auto-release after confirmation
+- 72h payment timer, 24h confirmation timer
+- Fee: recipient pays from received amount
+
+## ALWAYS check .cursorrules for detailed code style!

@@ -1,0 +1,63 @@
+---
+description: 
+globs: 
+alwaysApply: true
+---
+# General Rules
+[General]
+- This is a project called "NetworkPro AI", an assistant for MLM partners.
+- Always write clean, maintainable, and well-commented code.
+- Use English for all code, variables, comments, and responses.
+- Follow best practices for security, performance, and scalability.
+
+# Backend Rules (Python + FastAPI)
+[Backend]
+- Use FastAPI as the web framework.
+- Organize code by domains: routers, models, services, utils.
+- Use Pydantic for all data validation.
+- Ensure API returns JSON responses in RESTful style.
+- Always validate and sanitize incoming data.
+- Handle errors gracefully and return meaningful error messages.
+- Provide clear OpenAPI (Swagger) documentation.
+
+# Frontend Rules (Flutter)
+[Frontend]
+- Use Flutter and Dart for mobile app.
+- Build for both iOS and Android (cross-platform).
+- Follow Material Design guidelines.
+- Use stateless widgets when possible.
+- Ensure UI is minimalist, intuitive and adaptive to screen sizes.
+- Implement dark and light themes support.
+- Add comments to explain important parts of UI code.
+
+# AI and ML Integration Rules
+[AI]
+- Use OpenAI API (or compatible) for chat, NLP and sentiment analysis.
+- Use AI for recommendations, dialogue analysis, motivation generation.
+- Always handle AI API errors gracefully.
+- AI answers must be contextual and personalized for MLM user scenarios.
+- Provide explanations when needed to improve user experience.
+
+# Application Functional Rules
+[Features]
+- Implement Registration and Onboarding with email/Google/Apple login.
+- Create Personal Dashboard to display metrics and motivational content.
+- Build Smart Contact Planner with categorization and prioritization.
+- Implement AI-powered Dialogue Analysis with NLP and sentiment detection.
+- Provide MLM Knowledge Base and personalized materials.
+- Implement Goal Planning and Tracking with visualization.
+- Create AI Chat Assistant specialized in MLM and motivation.
+
+# External Integrations
+[Integrations]
+- Use Firebase for push notifications.
+- Integrate speech recognition using Google Speech-to-Text.
+- Use OCR for image recognition in dialogues.
+- Plan for future integration with messengers and calendars.
+
+# Project Management and UX
+[Project]
+- Always consider end-user: MLM professionals at various levels.
+- Focus on making the app simple, motivational and result-driven.
+- Avoid technical jargon in user-facing parts.
+- Prepare code for easy scaling and feature expansion.
