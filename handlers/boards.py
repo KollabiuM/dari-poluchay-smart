@@ -7,7 +7,7 @@ from typing import Optional
 
 from aiogram import Router, F
 from aiogram.filters import Command, CommandObject
-from aiogram.types import Message, CallbackQuery
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 
 from database import AsyncSessionLocal
 from services.table_service import TableService, JoinResult
@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 @router.message(Command("boards"))
 @router.message(F.text == "📋 Мои доски")
 async def cmd_boards(message: Message) -> None:
-    """Показать все доски пользователя с суммарной статистикой."""
+    """Показать все доски пользователя в виде кнопок."""
     if not message.from_user:
         return
     
@@ -75,65 +75,36 @@ async def cmd_boards(message: Message) -> None:
             13: "Титановая",
         }
         
-        # Группируем доски по уровням и считаем подарки
-        level_stats = {}  # {level: {"gifts_received": количество, "user_on_level": bool}}
-        
-        for level in range(1, 14):
-            level_stats[level] = {
-                "gifts_received": 0,  # Количество полученных подарков (не сумма!)
-                "user_on_level": False,
-            }
-        
-        # Определяем максимальный уровень, на котором пользователь находится
-        max_user_level = 0
+        # Находим доску пользователя для каждого уровня
+        user_tables_by_level = {}  # {level: table}
         
         for table in all_tables:
-            level = table.level
-            # Считаем количество полученных подарков на этой доске
-            level_stats[level]["gifts_received"] += table.gifts_received
-            
-            # Проверяем, находится ли пользователь на этой доске
             position = await table_service.get_user_position(table, tid)
             if position:
-                level_stats[level]["user_on_level"] = True
-                if level > max_user_level:
-                    max_user_level = level
+                # Пользователь находится на этой доске
+                level = table.level
+                # Сохраняем первую найденную доску на этом уровне
+                if level not in user_tables_by_level:
+                    user_tables_by_level[level] = table
+        
+        # Определяем максимальный уровень, на котором пользователь находится
+        max_user_level = max(user_tables_by_level.keys()) if user_tables_by_level else 0
         
         # Определяем доступные уровни:
         # ✅ Доступны: уровни, на которых пользователь уже есть + следующий после максимального
         # ❌ Недоступны: остальные уровни
-        available_levels = set()
-        for level in range(1, 14):
-            if level_stats[level]["user_on_level"]:
-                available_levels.add(level)
-        
-        # Добавляем следующий уровень после максимального (если не Titan)
+        available_levels = set(user_tables_by_level.keys())
         if max_user_level > 0 and max_user_level < 13:
             next_level = max_user_level + 1
             available_levels.add(next_level)
         
-        # Считаем суммарное количество полученных подарков (в рублях)
-        # Конвертируем USDT в рубли (примерно 1 USDT = 100₽)
-        USDT_TO_RUB = 100
-        total_gifts_rub = 0
+        # Формируем кнопки сверху вниз (от Titan к Start)
+        buttons = []
         
-        for level in range(1, 14):
+        for level in range(13, 0, -1):  # От 13 (Titan) к 1 (Start)
+            level_name_ru = level_names_ru.get(level, f"Уровень {level}")
             level_info = LEVELS.get(level, {})
             gift_amount_usdt = level_info.get("amount", 0)
-            gifts_count = level_stats[level]["gifts_received"]
-            # Сумма = количество подарков * номинал подарка * курс
-            total_gifts_rub += gifts_count * gift_amount_usdt * USDT_TO_RUB
-        
-        # Формируем сообщение
-        lines = []
-        
-        # Заголовок с суммарным количеством подарков
-        lines.append(f"🎁 <b>Ваши подарки: {total_gifts_rub:,}₽</b>\n")
-        
-        # Список досок снизу вверх (от Start к Titan)
-        for level in range(1, 14):
-            level_name_ru = level_names_ru.get(level, f"Уровень {level}")
-            gifts_received = level_stats[level]["gifts_received"]
             
             # Определяем иконку доступности
             if level in available_levels:
@@ -141,21 +112,48 @@ async def cmd_boards(message: Message) -> None:
             else:
                 icon = "❌"
             
-            # Формируем строку: ✅/❌ Название доски (количество полученных подарков)
-            # В скобках показываем сумму в рублях (количество * номинал * курс)
+            # Находим доску пользователя на этом уровне
+            user_table = user_tables_by_level.get(level)
+            
+            if user_table:
+                # Пользователь на доске - считаем подарки в USDT
+                gifts_received = user_table.gifts_received
+                gifts_amount_usdt_total = gifts_received * gift_amount_usdt
+                
+                button_text = f"{level_name_ru} {icon} ({gifts_amount_usdt_total} USDT)"
+                callback_data = f"view_board:{user_table.id}"
+            else:
+                # Пользователь не на доске
+                button_text = f"{level_name_ru} {icon} (0 USDT)"
+                # Если уровень доступен (следующий после максимального), можно войти
+                if level in available_levels and level == max_user_level + 1:
+                    callback_data = f"join_level:{level}"
+                else:
+                    # Недоступный уровень - показываем информацию
+                    callback_data = f"level_info:{level}"
+            
+            buttons.append([
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=callback_data,
+                )
+            ])
+        
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        
+        # Считаем суммарное количество полученных подарков в USDT
+        total_gifts_usdt = 0
+        for level, table in user_tables_by_level.items():
             level_info = LEVELS.get(level, {})
             gift_amount_usdt = level_info.get("amount", 0)
-            gifts_amount_rub = gifts_received * gift_amount_usdt * USDT_TO_RUB
-            
-            lines.append(
-                f"{icon} <b>{level_name_ru} доска</b> ({gifts_amount_rub:,}₽)"
-            )
+            total_gifts_usdt += table.gifts_received * gift_amount_usdt
         
-        text = "\n".join(lines)
+        text = f"🎁 <b>Ваши подарки: {total_gifts_usdt:,} USDT</b>\n\nВыберите доску:"
         
         await message.answer(
             text,
             parse_mode="HTML",
+            reply_markup=keyboard,
         )
 
 
@@ -401,6 +399,45 @@ async def callback_view_board(callback: CallbackQuery) -> None:
         )
     
     await callback.answer()
+
+
+@router.callback_query(F.data.startswith("level_info:"))
+async def callback_level_info(callback: CallbackQuery) -> None:
+    """Информация о недоступном уровне."""
+    if not callback.from_user or not callback.data:
+        return
+    
+    level = int(callback.data.split(":")[1])
+    level_info = LEVELS.get(level, {})
+    level_name = level_info.get("name", f"Уровень {level}")
+    amount = level_info.get("amount", 0)
+    
+    # Маппинг русских названий
+    level_names_ru = {
+        1: "Стартовая",
+        2: "Оловянная",
+        3: "Бронзовая",
+        4: "Медная",
+        5: "Серебряная",
+        6: "Янтарная",
+        7: "Золотая",
+        8: "Рубиновая",
+        9: "Платиновая",
+        10: "Изумрудная",
+        11: "Бриллиантовая",
+        12: "Сапфировая",
+        13: "Титановая",
+    }
+    level_name_ru = level_names_ru.get(level, level_name)
+    
+    text = (
+        f"❌ <b>{level_name_ru} доска недоступна</b>\n\n"
+        f"Номинал подарка: <b>{amount} USDT</b>\n\n"
+        f"Эта доска ещё не активирована.\n"
+        f"Активируйте предыдущие уровни, чтобы получить доступ."
+    )
+    
+    await callback.answer(text, show_alert=True)
 
 
 @router.callback_query(F.data.startswith("leave_board:"))
